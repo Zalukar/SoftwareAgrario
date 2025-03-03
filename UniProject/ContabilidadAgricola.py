@@ -10,12 +10,10 @@ from PIL import Image, ImageTk  # Requiere instalar Pillow (pip install Pillow)
 conn = sqlite3.connect("cultivos.db")
 cursor = conn.cursor()
 
-# Asegurar que la columna 'email' exista en la tabla usuarios
-cursor.execute("PRAGMA table_info(usuarios)")
-columns = [col[1] for col in cursor.fetchall()]
-if "email" not in columns:
-    cursor.execute("ALTER TABLE usuarios ADD COLUMN email TEXT")
+# Habilitar claves foráneas
+cursor.execute("PRAGMA foreign_keys = ON")
 
+# Crear la tabla usuarios (incluyendo el campo email) si no existe
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS usuarios (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,6 +23,14 @@ CREATE TABLE IF NOT EXISTS usuarios (
     email TEXT
 )
 """)
+
+# (Opcional) Verificar que la columna 'email' exista y, en caso de que la base de datos sea antigua, agregarla.
+cursor.execute("PRAGMA table_info(usuarios)")
+columns = [col[1] for col in cursor.fetchall()]
+if "email" not in columns:
+    cursor.execute("ALTER TABLE usuarios ADD COLUMN email TEXT")
+
+# Crear la tabla de hectáreas
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS hectareas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,11 +41,92 @@ CREATE TABLE IF NOT EXISTS hectareas (
     cosecha_rutinaria TEXT
 )
 """)
-# Por defecto, solo se inserta el usuario admin (sin correo)
+# Insertar por defecto el usuario admin (sin correo)
 cursor.execute("""
 INSERT OR IGNORE INTO usuarios (username, password, role, email) VALUES
 ('admin', 'admin123', 'admin', NULL)
 """)
+
+# Nuevas tablas para Gestión Cultivo
+
+# Tabla Tipo de Suelo (por ejemplo: arenosos, limosos, francos, arcillosos)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS tipo_suelo (
+    codigo INTEGER PRIMARY KEY AUTOINCREMENT,
+    nombre TEXT UNIQUE,
+    descripcion TEXT,
+    imagen TEXT
+)
+""")
+
+# Tabla Tipo de Hortaliza (Bulbos, Tallos comestibles, Raíces comestibles, Frutos, Hojas, Flores, Tubérculos, etc.)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS tipo_hortaliza (
+    codigo INTEGER PRIMARY KEY AUTOINCREMENT,
+    nombre TEXT UNIQUE,
+    descripcion TEXT,
+    imagen TEXT
+)
+""")
+# Insertar valores predeterminados si la tabla está vacía
+cursor.execute("SELECT COUNT(*) FROM tipo_hortaliza")
+if cursor.fetchone()[0] == 0:
+    default_hortalizas = [
+        ("Bulbos", "Vegetales de forma redonda que crecen bajo tierra.", "bulbos.jpg"),
+        ("Tallos comestibles", "Vegetales con tallos comestibles.", "tallos.jpg"),
+        ("Raíces comestibles", "Vegetales con raíces comestibles.", "raices.jpg"),
+        ("Frutos", "Vegetales de tipo fruto.", "frutos.jpg"),
+        ("Hojas", "Vegetales donde se consumen las hojas.", "hojas.jpg"),
+        ("Flores", "Vegetales en los que se consumen las flores.", "flores.jpg"),
+        ("Tubérculos", "Vegetales con tubérculos comestibles.", "tuberculos.jpg")
+    ]
+    cursor.executemany("INSERT INTO tipo_hortaliza (nombre, descripcion, imagen) VALUES (?, ?, ?)", default_hortalizas)
+    conn.commit()
+
+# Tabla Clima (tropical, seco, templado, continental, polar, etc.)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS clima (
+    codigo INTEGER PRIMARY KEY AUTOINCREMENT,
+    nombre TEXT UNIQUE,
+    grados_temperatura REAL,
+    descripcion TEXT,
+    imagen TEXT
+)
+""")
+# Insertar algunos climas predeterminados si está vacía
+cursor.execute("SELECT COUNT(*) FROM clima")
+if cursor.fetchone()[0] == 0:
+    default_climas = [
+        ("Tropical", 30, "Clima cálido y húmedo.", "tropical.jpg"),
+        ("Seco", 25, "Clima árido con poca humedad.", "seco.jpg"),
+        ("Templado", 20, "Clima moderado.", "templado.jpg"),
+        ("Continental", 15, "Clima con estaciones bien marcadas.", "continental.jpg"),
+        ("Polar", 0, "Clima muy frío.", "polar.jpg")
+    ]
+    cursor.executemany("INSERT INTO clima (nombre, grados_temperatura, descripcion, imagen) VALUES (?, ?, ?, ?)", default_climas)
+    conn.commit()
+
+# Tabla Gestión Cultivo, que se relaciona con usuario (persona), tipo_hortaliza, tipo_suelo y clima
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS gestion_cultivo (
+    codigo INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_persona INTEGER,
+    video TEXT,
+    observaciones TEXT,
+    FOREIGN KEY(id_persona) REFERENCES usuarios(id)
+)
+""")
+conn.commit()
+
+# Verificar y agregar columnas faltantes en la tabla gestion_cultivo si es necesario
+cursor.execute("PRAGMA table_info(gestion_cultivo)")
+cols = [col[1] for col in cursor.fetchall()]
+if "id_tipo_hortaliza" not in cols:
+    cursor.execute("ALTER TABLE gestion_cultivo ADD COLUMN id_tipo_hortaliza INTEGER")
+if "id_tipo_suelo" not in cols:
+    cursor.execute("ALTER TABLE gestion_cultivo ADD COLUMN id_tipo_suelo INTEGER")
+if "id_clima" not in cols:
+    cursor.execute("ALTER TABLE gestion_cultivo ADD COLUMN id_clima INTEGER")
 conn.commit()
 conn.close()
 
@@ -49,14 +136,40 @@ conn.close()
 class Hectarea:
     def __init__(self, numero, tipo_de_cultivo, siembra, primera_cosecha=None, cosecha_rutinaria=None):
         self.numero = numero
-        self.tipo_de_cultivo = tipo_de_cultivo
+        # Convertir el tipo de cultivo a minúsculas para comparación
+        self.tipo_de_cultivo = tipo_de_cultivo.lower()
         self.siembra = datetime.strptime(siembra, "%Y-%m-%d")
-        if tipo_de_cultivo.lower() == "limones":
+        
+        if self.tipo_de_cultivo == "limones":
+            # Para limones: primera cosecha a 5 años y cosecha rutinaria 180 días después
             self.primeracosecha = self.siembra.replace(year=self.siembra.year + 5)
             self.cosecha_rutinaria = (self.primeracosecha + timedelta(days=180)).strftime("%Y-%m-%d")
         else:
-            self.primeracosecha = datetime.strptime(primera_cosecha, "%Y-%m-%d")
-            self.cosecha_rutinaria = cosecha_rutinaria
+            # Si no se proporcionan fechas, se calculan según el tipo de cultivo usando datos aproximados
+            if not primera_cosecha:
+                if self.tipo_de_cultivo == "maíz":
+                    self.primeracosecha = self.siembra + timedelta(days=90)
+                elif self.tipo_de_cultivo == "trigo":
+                    self.primeracosecha = self.siembra + timedelta(days=120)
+                elif self.tipo_de_cultivo == "tomate":
+                    self.primeracosecha = self.siembra + timedelta(days=70)
+                else:
+                    # Valor por defecto para otros cultivos
+                    self.primeracosecha = self.siembra + timedelta(days=80)
+            else:
+                self.primeracosecha = datetime.strptime(primera_cosecha, "%Y-%m-%d")
+            
+            if not cosecha_rutinaria:
+                if self.tipo_de_cultivo == "maíz":
+                    self.cosecha_rutinaria = (self.primeracosecha + timedelta(days=30)).strftime("%Y-%m-%d")
+                elif self.tipo_de_cultivo == "trigo":
+                    self.cosecha_rutinaria = (self.primeracosecha + timedelta(days=30)).strftime("%Y-%m-%d")
+                elif self.tipo_de_cultivo == "tomate":
+                    self.cosecha_rutinaria = (self.primeracosecha + timedelta(days=15)).strftime("%Y-%m-%d")
+                else:
+                    self.cosecha_rutinaria = (self.primeracosecha + timedelta(days=20)).strftime("%Y-%m-%d")
+            else:
+                self.cosecha_rutinaria = cosecha_rutinaria
 
     def guardar_en_bd(self):
         conn = sqlite3.connect("cultivos.db")
@@ -85,7 +198,7 @@ class Hectarea:
             UPDATE hectareas 
             SET tipo_de_cultivo = ?, siembra = ?, primera_cosecha = ?, cosecha_rutinaria = ?
             WHERE numero = ?
-        """, (tipo, siembra, primera, rutinaria, numero))
+        """, (tipo.lower(), siembra, primera, rutinaria, numero))
         conn.commit()
         conn.close()
 
@@ -112,12 +225,13 @@ class Application(tk.Tk):
         self.user_role = None
         self.current_email = None  # Se guarda el correo para usuarios normales
         
-        # Contenedor para los frames (sin color de fondo para que se vea la imagen)
+        # Contenedor para los frames
         container = tk.Frame(self)
         container.pack(side="top", fill="both", expand=True)
         self.frames = {}
-        for F in (LoginFrame, CultivosMainFrame, UserManagementFrame, GestionarHectareasFrame):
-            # No especificamos bg para que se herede el fondo (o se vea el fondo raíz)
+        # Se agregan los frames existentes y los nuevos
+        for F in (LoginFrame, CultivosMainFrame, UserManagementFrame, GestionarHectareasFrame,
+                  PerfilFrame, GestionCultivoFrame, InformeGestionCultivoFrame, ConsultaCultivoFrame):
             frame = F(container, self)
             self.frames[F] = frame
             frame.grid(row=0, column=0, sticky="nsew")
@@ -138,6 +252,12 @@ class Application(tk.Tk):
                 frame.email_label.forget()
         elif cont == GestionarHectareasFrame:
             frame.refresh_hectareas()
+        elif cont == PerfilFrame:
+            frame.cargar_perfil()
+        elif cont == InformeGestionCultivoFrame:
+            frame.cargar_informe()
+        elif cont == ConsultaCultivoFrame:
+            frame.cargar_consulta()
         frame.tkraise()
 
 # -----------------------------
@@ -152,6 +272,8 @@ class LoginFrame(tk.Frame):
         self.users_frame = tk.Frame(self)
         self.users_frame.pack()
         self.refresh_users()
+        # Botón para recuperar contraseña vía correo
+        tk.Button(self, text="Recuperar Contraseña", font=("Helvetica", 12), command=self.recuperar_contrasena).pack(pady=10)
     
     def refresh_users(self):
         for widget in self.users_frame.winfo_children():
@@ -182,6 +304,20 @@ class LoginFrame(tk.Frame):
             self.controller.show_frame(CultivosMainFrame)
         else:
             messagebox.showerror("Error", "Contraseña incorrecta.")
+    
+    def recuperar_contrasena(self):
+        email = simpledialog.askstring("Recuperar Contraseña", "Ingrese su correo electrónico:", parent=self)
+        if not email:
+            return
+        conn = sqlite3.connect("cultivos.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT username, password FROM usuarios WHERE email = ?", (email,))
+        result = cursor.fetchone()
+        conn.close()
+        if result:
+            messagebox.showinfo("Recuperación", f"Usuario: {result[0]}\nContraseña: {result[1]}\n(Se simula envío de correo)")
+        else:
+            messagebox.showerror("Error", "No se encontró un usuario con ese correo.")
 
 # -----------------------------
 # Frame: Interfaz Principal de Cultivos
@@ -213,8 +349,13 @@ class CultivosMainFrame(tk.Frame):
         tk.Button(self.menu_frame, text="Registrar Hectárea", font=("Helvetica", 12), command=self.show_registrar_view).pack(side="left", padx=5)
         tk.Button(self.menu_frame, text="Mostrar Hectáreas", font=("Helvetica", 12), command=self.show_mostrar_view).pack(side="left", padx=5)
         tk.Button(self.menu_frame, text="Buscar Hectárea", font=("Helvetica", 12), command=self.show_buscar_view).pack(side="left", padx=5)
+        # Nuevos botones para funcionalidades adicionales
+        tk.Button(self.menu_frame, text="Perfil", font=("Helvetica", 12), command=lambda: self.controller.show_frame(PerfilFrame)).pack(side="left", padx=5)
+        tk.Button(self.menu_frame, text="Informe Cultivo", font=("Helvetica", 12), command=lambda: self.controller.show_frame(InformeGestionCultivoFrame)).pack(side="left", padx=5)
+        tk.Button(self.menu_frame, text="Consulta Cultivo", font=("Helvetica", 12), command=lambda: self.controller.show_frame(ConsultaCultivoFrame)).pack(side="left", padx=5)
         if self.controller.user_role == "admin":
             tk.Button(self.menu_frame, text="Gestionar Hectáreas", font=("Helvetica", 12), command=lambda: self.controller.show_frame(GestionarHectareasFrame)).pack(side="left", padx=5)
+            tk.Button(self.menu_frame, text="Gestión Cultivo", font=("Helvetica", 12), command=lambda: self.controller.show_frame(GestionCultivoFrame)).pack(side="left", padx=5)
             tk.Button(self.menu_frame, text="Gestionar Usuarios", font=("Helvetica", 12), command=lambda: self.controller.show_frame(UserManagementFrame)).pack(side="left", padx=5)
         tk.Button(self.menu_frame, text="Logout", font=("Helvetica", 12), command=lambda: self.controller.show_frame(LoginFrame)).pack(side="left", padx=5)
     
@@ -226,7 +367,18 @@ class CultivosMainFrame(tk.Frame):
         self.clear_content()
         tk.Label(self.content_frame, text="Registrar Hectárea", font=("Helvetica", 14, "bold"), fg="#333333").pack(pady=10)
         tk.Label(self.content_frame, text="Seleccione Tipo de Cultivo:", font=("Helvetica", 12), fg="#333333").pack()
-        crop_types = ["Limones", "Maíz", "Trigo", "Tomate"]
+
+        # Consultar la tabla tipo_hortaliza para obtener los nombres disponibles
+        conn = sqlite3.connect("cultivos.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT nombre FROM tipo_hortaliza")
+        rows = cursor.fetchall()
+        conn.close()
+        if rows:
+            crop_types = [r[0] for r in rows]
+        else:
+            crop_types = ["limones", "maíz", "trigo", "tomate"]
+
         self.selected_crop_type = tk.StringVar(value=crop_types[0])
         crop_frame = tk.Frame(self.content_frame)
         crop_frame.pack(pady=5)
@@ -250,8 +402,8 @@ class CultivosMainFrame(tk.Frame):
         tk.Button(self.content_frame, text="Volver", font=("Helvetica", 12), command=self.show_mostrar_view).pack(pady=5)
     
     def toggle_additional_fields(self):
-        crop = self.selected_crop_type.get()
-        if crop.lower() == "limones":
+        crop = self.selected_crop_type.get().lower()
+        if crop == "limones":
             self.additional_frame.pack_forget()
         else:
             self.additional_frame.pack(pady=5)
@@ -266,8 +418,9 @@ class CultivosMainFrame(tk.Frame):
             primera = self.primera_entry.get().strip()
             rutinaria = self.rutinaria_entry.get().strip()
             if not primera or not rutinaria:
-                messagebox.showerror("Error", "Ingrese la fecha de primera cosecha y la cosecha rutinaria.")
-                return
+                # Si no se ingresan fechas, la clase Hectarea calculará automáticamente
+                primera = None
+                rutinaria = None
         else:
             primera = None
             rutinaria = None
@@ -544,6 +697,197 @@ class GestionarHectareasFrame(tk.Frame):
             self.refresh_hectareas()
         except Exception as e:
             messagebox.showerror("Error", str(e))
+
+# -----------------------------
+# Frame: Perfil (datos del usuario logueado)
+# -----------------------------
+class PerfilFrame(tk.Frame):
+    def __init__(self, parent, controller):
+        tk.Frame.__init__(self, parent)
+        self.controller = controller
+        tk.Label(self, text="Perfil de Usuario", font=("Helvetica", 18, "bold"), fg="#333333").pack(pady=20)
+        self.info_label = tk.Label(self, text="", font=("Helvetica", 14))
+        self.info_label.pack(pady=10)
+        tk.Button(self, text="Volver", font=("Helvetica", 12), command=lambda: controller.show_frame(CultivosMainFrame)).pack(pady=10)
+    
+    def cargar_perfil(self):
+        user = self.controller.current_user
+        email = self.controller.current_email
+        role = self.controller.user_role
+        self.info_label.config(text=f"Usuario: {user}\nEmail: {email}\nRol: {role}")
+
+# -----------------------------
+# Frame: Gestión Cultivo (solo para admin)
+# -----------------------------
+class GestionCultivoFrame(tk.Frame):
+    def __init__(self, parent, controller):
+        tk.Frame.__init__(self, parent)
+        self.controller = controller
+        tk.Label(self, text="Gestión Cultivo", font=("Helvetica", 18, "bold"), fg="#333333").pack(pady=20)
+        # Botón para registrar gestión cultivo
+        tk.Button(self, text="Registrar Gestión Cultivo", font=("Helvetica", 12), command=self.registrar_gestion).pack(pady=5)
+        # Listado de registros
+        self.gestion_list = tk.Listbox(self, width=80, font=("Helvetica", 12))
+        self.gestion_list.pack(pady=10, fill="both", expand=True)
+        tk.Button(self, text="Editar Seleccionada", font=("Helvetica", 12), command=self.editar_gestion).pack(pady=5)
+        tk.Button(self, text="Eliminar Seleccionada", font=("Helvetica", 12), command=self.eliminar_gestion).pack(pady=5)
+        tk.Button(self, text="Volver", font=("Helvetica", 12), command=lambda: controller.show_frame(CultivosMainFrame)).pack(pady=10)
+        self.cargar_gestiones()
+    
+    def cargar_gestiones(self):
+        self.gestion_list.delete(0, tk.END)
+        conn = sqlite3.connect("cultivos.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT codigo, id_persona, id_tipo_hortaliza, id_tipo_suelo, id_clima, video, observaciones FROM gestion_cultivo")
+        gestiones = cursor.fetchall()
+        conn.close()
+        for g in gestiones:
+            self.gestion_list.insert(tk.END, f"Código: {g[0]} | Persona ID: {g[1]} | Hortaliza ID: {g[2]} | Suelo ID: {g[3]} | Clima ID: {g[4]} | Video: {g[5]} | Obs: {g[6]}")
+    
+    def registrar_gestion(self):
+        try:
+            id_persona = int(simpledialog.askstring("Registrar", "ID de la Persona:", parent=self))
+            id_hortaliza = int(simpledialog.askstring("Registrar", "ID de Tipo de Hortaliza:", parent=self))
+            id_suelo = int(simpledialog.askstring("Registrar", "ID de Tipo de Suelo:", parent=self))
+            id_clima = int(simpledialog.askstring("Registrar", "ID de Clima:", parent=self))
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "IDs deben ser números válidos.")
+            return
+        video = simpledialog.askstring("Registrar", "Video (URL o ruta):", parent=self)
+        observaciones = simpledialog.askstring("Registrar", "Observaciones:", parent=self)
+        conn = sqlite3.connect("cultivos.db")
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO gestion_cultivo (id_persona, id_tipo_hortaliza, id_tipo_suelo, id_clima, video, observaciones)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (id_persona, id_hortaliza, id_suelo, id_clima, video, observaciones))
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Registro", "Gestión cultivo registrada.")
+        self.cargar_gestiones()
+    
+    def editar_gestion(self):
+        selected = self.gestion_list.curselection()
+        if not selected:
+            messagebox.showerror("Error", "Seleccione una gestión para editar.")
+            return
+        line = self.gestion_list.get(selected[0])
+        codigo = int(line.split("|")[0].split(":")[1].strip())
+        conn = sqlite3.connect("cultivos.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT id_persona, id_tipo_hortaliza, id_tipo_suelo, id_clima, video, observaciones FROM gestion_cultivo WHERE codigo = ?", (codigo,))
+        data = cursor.fetchone()
+        conn.close()
+        if not data:
+            messagebox.showerror("Error", "No se encontró la gestión seleccionada.")
+            return
+        try:
+            id_persona = int(simpledialog.askstring("Editar", "Nuevo ID de la Persona:", initialvalue=data[0], parent=self))
+            id_hortaliza = int(simpledialog.askstring("Editar", "Nuevo ID de Tipo de Hortaliza:", initialvalue=data[1], parent=self))
+            id_suelo = int(simpledialog.askstring("Editar", "Nuevo ID de Tipo de Suelo:", initialvalue=data[2], parent=self))
+            id_clima = int(simpledialog.askstring("Editar", "Nuevo ID de Clima:", initialvalue=data[3], parent=self))
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "IDs deben ser números válidos.")
+            return
+        video = simpledialog.askstring("Editar", "Nuevo Video:", initialvalue=data[4], parent=self)
+        observaciones = simpledialog.askstring("Editar", "Nuevas Observaciones:", initialvalue=data[5], parent=self)
+        conn = sqlite3.connect("cultivos.db")
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE gestion_cultivo
+            SET id_persona = ?, id_tipo_hortaliza = ?, id_tipo_suelo = ?, id_clima = ?, video = ?, observaciones = ?
+            WHERE codigo = ?
+        """, (id_persona, id_hortaliza, id_suelo, id_clima, video, observaciones, codigo))
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Éxito", "Gestión cultivo actualizada.")
+        self.cargar_gestiones()
+    
+    def eliminar_gestion(self):
+        selected = self.gestion_list.curselection()
+        if not selected:
+            messagebox.showerror("Error", "Seleccione una gestión para eliminar.")
+            return
+        line = self.gestion_list.get(selected[0])
+        codigo = int(line.split("|")[0].split(":")[1].strip())
+        if messagebox.askyesno("Confirmar", f"¿Está seguro de eliminar la gestión con código {codigo}?"):
+            conn = sqlite3.connect("cultivos.db")
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM gestion_cultivo WHERE codigo = ?", (codigo,))
+            conn.commit()
+            conn.close()
+            messagebox.showinfo("Éxito", "Gestión cultivo eliminada.")
+            self.cargar_gestiones()
+
+# -----------------------------
+# Frame: Informe de Gestión Cultivo
+# -----------------------------
+class InformeGestionCultivoFrame(tk.Frame):
+    def __init__(self, parent, controller):
+        tk.Frame.__init__(self, parent)
+        self.controller = controller
+        tk.Label(self, text="Informe de Gestión Cultivo", font=("Helvetica", 18, "bold"), fg="#333333").pack(pady=20)
+        self.informe_text = tk.Text(self, wrap="word", font=("Helvetica", 12))
+        self.informe_text.pack(fill="both", expand=True, padx=10, pady=10)
+        tk.Button(self, text="Volver", font=("Helvetica", 12), command=lambda: controller.show_frame(CultivosMainFrame)).pack(pady=10)
+    
+    def cargar_informe(self):
+        self.informe_text.delete("1.0", tk.END)
+        conn = sqlite3.connect("cultivos.db")
+        cursor = conn.cursor()
+        # Se utiliza JOIN para obtener los nombres de las tablas relacionadas
+        cursor.execute("""
+            SELECT gc.codigo, u.username, th.nombre, ts.nombre, c.nombre, gc.video, gc.observaciones
+            FROM gestion_cultivo gc
+            JOIN usuarios u ON gc.id_persona = u.id
+            JOIN tipo_hortaliza th ON gc.id_tipo_hortaliza = th.codigo
+            JOIN tipo_suelo ts ON gc.id_tipo_suelo = ts.codigo
+            JOIN clima c ON gc.id_clima = c.codigo
+        """)
+        registros = cursor.fetchall()
+        conn.close()
+        if registros:
+            for r in registros:
+                self.informe_text.insert(tk.END, f"Código: {r[0]}\nUsuario: {r[1]}\nTipo Hortaliza: {r[2]}\nTipo Suelo: {r[3]}\nClima: {r[4]}\nVideo: {r[5]}\nObservaciones: {r[6]}\n{'-'*40}\n")
+        else:
+            self.informe_text.insert(tk.END, "No hay registros de gestión cultivo.")
+
+# -----------------------------
+# Frame: Consulta sobre Tipo de Cultivo
+# -----------------------------
+class ConsultaCultivoFrame(tk.Frame):
+    def __init__(self, parent, controller):
+        tk.Frame.__init__(self, parent)
+        self.controller = controller
+        tk.Label(self, text="Consulta Tipo de Cultivo", font=("Helvetica", 18, "bold"), fg="#333333").pack(pady=20)
+        tk.Label(self, text="Ingrese el nombre del tipo de hortaliza:", font=("Helvetica", 12)).pack(pady=5)
+        self.consulta_entry = tk.Entry(self, font=("Helvetica", 12))
+        self.consulta_entry.pack(pady=5)
+        tk.Button(self, text="Buscar", font=("Helvetica", 12), command=self.buscar_tipo).pack(pady=5)
+        self.result_text = tk.Text(self, wrap="word", font=("Helvetica", 12))
+        self.result_text.pack(fill="both", expand=True, padx=10, pady=10)
+        tk.Button(self, text="Volver", font=("Helvetica", 12), command=lambda: controller.show_frame(CultivosMainFrame)).pack(pady=10)
+    
+    def cargar_consulta(self):
+        self.consulta_entry.delete(0, tk.END)
+        self.result_text.delete("1.0", tk.END)
+    
+    def buscar_tipo(self):
+        nombre = self.consulta_entry.get().strip()
+        if not nombre:
+            messagebox.showerror("Error", "Ingrese un nombre para consultar.")
+            return
+        conn = sqlite3.connect("cultivos.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT codigo, nombre, descripcion, imagen FROM tipo_hortaliza WHERE nombre LIKE ?", ('%' + nombre + '%',))
+        registros = cursor.fetchall()
+        conn.close()
+        self.result_text.delete("1.0", tk.END)
+        if registros:
+            for r in registros:
+                self.result_text.insert(tk.END, f"Código: {r[0]}\nNombre: {r[1]}\nDescripción: {r[2]}\nImagen: {r[3]}\n{'-'*30}\n")
+        else:
+            self.result_text.insert(tk.END, "No se encontró el tipo de cultivo.")
 
 if __name__ == "__main__":
     app = Application()
